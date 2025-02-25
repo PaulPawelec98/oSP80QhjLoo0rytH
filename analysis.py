@@ -562,7 +562,7 @@ y = y.replace({'yes': 1, 'no': 0})
 X_train, X_test, y_train, y_test = train_test_split(
     X,
     y,
-    test_size=0.85,
+    test_size=0.5,
     random_state=seed,
     stratify=y  # Ensures equal class distribution
 )
