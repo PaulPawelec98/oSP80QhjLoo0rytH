@@ -760,6 +760,34 @@ I've ran a couple times and it seems like PassiveAggressiveClassifier might be
  LinearDiscriminantAnalysis, or XGBClassifier might also be good models to
  use.
 
+                                tp   tn   fp   fn
+NearestCentroid               0.75 0.89 0.11 0.25
+QuadraticDiscriminantAnalysis 0.54 0.69 0.31 0.46
+PassiveAggressiveClassifier   0.43 0.96 0.04 0.57
+LinearDiscriminantAnalysis    0.41 0.97 0.03 0.59
+Perceptron                    0.40 0.92 0.08 0.60
+GaussianNB                    0.39 0.94 0.06 0.61
+DecisionTreeClassifier        0.39 0.95 0.05 0.61
+XGBClassifier                 0.34 0.98 0.02 0.66
+AdaBoostClassifier            0.33 0.98 0.02 0.67
+LGBMClassifier                0.32 0.98 0.02 0.68
+ExtraTreeClassifier           0.30 0.95 0.05 0.70
+BaggingClassifier             0.29 0.98 0.02 0.71
+LogisticRegression            0.27 0.99 0.01 0.73
+CalibratedClassifierCV        0.26 0.99 0.01 0.74
+LabelPropagation              0.25 0.96 0.04 0.75
+LabelSpreading                0.25 0.96 0.04 0.75
+SGDClassifier                 0.22 0.99 0.01 0.78
+LinearSVC                     0.20 0.99 0.01 0.80
+RandomForestClassifier        0.19 0.99 0.01 0.81
+ExtraTreesClassifier          0.17 0.99 0.01 0.83
+BernoulliNB                   0.16 0.98 0.02 0.84
+RidgeClassifier               0.14 0.99 0.01 0.86
+RidgeClassifierCV             0.14 0.99 0.01 0.86
+SVC                           0.14 0.99 0.01 0.86
+KNeighborsClassifier          0.12 0.99 0.01 0.88
+DummyClassifier               0.00 1.00 0.00 1.00
+
 Otherwise, NearestCentroid and QuadraticDiscriminantAnalysis, both seem like
 good models.
 '''
@@ -1033,6 +1061,11 @@ model = model.fit(X_train_t_df, y_train)
 fitted_models['Stacking'] = model
 # -----------------------------------------------------------------------------
 
+'''
+Maybe I could add in more models just for voting? Our models are fairly simple,
+maybe we could tune a more complicated model better?
+'''
+
 # %% [9] Model Results
 
 # Gather Accuracy Scores ------------------------------------------------------
@@ -1086,7 +1119,6 @@ Otherwise, most models are fairly accurate with accuracy scores as high as 93%
   'QuadraticDiscriminantAnalysis': 0.9344285714285714,
   'Voting': 0.9347142857142857,
   'Stacking': 0.9313928571428571}
-
 '''
 # -----------------------------------------------------------------------------
 
@@ -1214,7 +1246,6 @@ array([[23462,  2511],
        [  638,  1389]], dtype=int64)
 
 If I tune for better shrinkage, I don't get much of an improvement
-
 
 If I try for other scores like matthews or default I don't see much
 improvments
