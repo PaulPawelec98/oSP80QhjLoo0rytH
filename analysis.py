@@ -21,10 +21,11 @@ import seaborn as sns
 
 # Statistical Modeling
 import statsmodels.api as sm
+import statsmodels.formula.api as smf
 from statsmodels.iolib.summary2 import summary_col
 
 # General ML Frameworks
-# import lazypredict
+import lazypredict
 from lazypredict.Supervised import LazyClassifier
 
 # Transformations & Preprocessing
@@ -40,12 +41,13 @@ from sklearn.neighbors import NearestCentroid
 from sklearn.linear_model import PassiveAggressiveClassifier
 from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
 from sklearn.linear_model import LogisticRegression  # for ensemble
+from sklearn.ensemble import RandomForestClassifier
 
 # dimension reduction
 from sklearn.decomposition import TruncatedSVD
 
 # optimization
-# from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import GridSearchCV
 
 # Evaluation Metrics
 from sklearn.metrics import confusion_matrix
@@ -60,7 +62,6 @@ from sklearn.ensemble import StackingClassifier
 from hyperopt import fmin, tpe, hp, STATUS_OK
 from hyperopt.pyll.base import scope
 from hyperopt import space_eval
-from HyperOptObj import HyperOptObj # custom class, check folder
 
 # %% [2] Background
 '''
@@ -162,6 +163,9 @@ pd.set_option("display.width", 1000)  # Adjust width for long outputs
 path = r'E:\My Stuff\Projects\Apziva\4132339939'
 os.chdir(path)
 
+# Custom Class
+from HyperOptObj import HyperOptObj
+
 df = pd.read_csv('term-deposit-marketing-2020.csv')
 
 # %% [4] Exploratory
@@ -178,6 +182,14 @@ _cols_categorical = [
 _cols_numerical = [
     col for col, dtype in df.dtypes.items() if not dtype == 'O' and col != 'y'
     ]
+# -----------------------------------------------------------------------------
+
+# Corr Matrix -----------------------------------------------------------------
+df_temp = df.copy()
+df_temp['y'] = df['y'].replace({'yes': 1, 'no': 0})
+sns.heatmap(df_temp.corr(), annot=True, cmap='coolwarm')
+plt.title("Correlation Matrix")
+plt.show()
 # -----------------------------------------------------------------------------
 
 # Bar Plots -------------------------------------------------------------------
@@ -453,6 +465,8 @@ plt.show()
 '''
 Nothing polarizing except for duration! Seems like longer durations were able
 to turn clients onto term deposits.
+
+- seems like lower incomes wouldn't sign onto term deposits? (balance)
 '''
 # -----------------------------------------------------------------------------
 
@@ -466,7 +480,7 @@ Super small mean!! 0.0724 Very small sample of people who have a term deposit.
 '''
 # -----------------------------------------------------------------------------
 
-# %% [5] Logistic Regressions
+# %% [5A] Logistic Regressions
 '''
 - run single regressions
 - review results
@@ -519,7 +533,7 @@ results, pred, models = run_single_regressions(
     df['y'], df[df.columns[0:-1]]
     )
 
-dfresults = summary_col(models[9], stars=True, float_format='%0.4f')
+dfresults = summary_col(models, stars=True, float_format='%0.4f')
 dfresults
 
 # dfresults.tables[0].to_csv("result_tables.csv")
@@ -546,6 +560,97 @@ I think it's unlikely for people to convice individuals to change their risk
 tolerance.
 '''
 # -----------------------------------------------------------------------------
+
+# %% [5B] Multivariate Logistic Regressions
+'''
+More risk averse individuals I think would typically be:
+    - job: low skill, low education, unemployed, etc...
+'''
+
+# Variables
+reg_results = {}
+data = df.copy()
+data['y'] = data['y'].replace({'yes': 1, 'no': 0})
+
+# duration ~ job --------------------------------------------------------------
+reg1 = "duration~job"
+reg_results[reg1] = smf.ols(reg1, data=data).fit()
+# -----------------------------------------------------------------------------
+
+# duration ~ 'Kitchen Sink' ---------------------------------------------------
+cols = list(df.columns)
+cols.remove('duration')
+reg2 = f"duration~{('+').join(cols)}"
+reg_results[reg2] = smf.ols(reg2, data=data).fit()
+# -----------------------------------------------------------------------------
+
+# y ~ duration ----------------------------------------------------------------
+reg3 = "y~duration"
+reg_results[reg3] = smf.logit(reg3, data=data).fit()
+# -----------------------------------------------------------------------------
+
+# y ~ balance -----------------------------------------------------------------
+# data_temp = data.copy()
+# data_temp['balance'] = np.log(data['balance'] - + min(data['balance']) + 1)
+reg4 = 'y~balance'
+reg_results[reg4] = smf.logit(reg4, data=data).fit()
+# -----------------------------------------------------------------------------
+
+# y ~ 'Kitchen Sink'  ---------------------------------------------------------
+cols = list(df.columns)
+cols.remove('y')
+reg5 = f"y~{('+').join(cols)}"
+reg_results[reg5] = smf.logit(reg5, data=data).fit()
+# -----------------------------------------------------------------------------
+
+# duration ~ y ----------------------------------------------------------------
+reg6 = 'duration~y'
+reg_results[reg6] = smf.logit(reg6, data=df).fit()
+# -----------------------------------------------------------------------------
+
+summary_col(reg_results[reg2], stars=True, float_format='%0.4f')
+
+'''
+"duration~job"
+    - blue collar*** +
+    - self-employed** +
+    - unemployed*** +
+
+f"duration~{('+').join(cols)} - everything
+    - blue collar, services, self-employed continue to be statistically and
+    economical significance
+    - services*** +, housemaid*** +, entrepreneur** +, retired** +,
+    student*** -, all of these are statisically significant now, but weren't
+    before.
+    - They are going to have much longer conversations be more likely to
+    subscribe to a term deposit.
+    - duration increases by 482 seconds when y == 1?!
+
+"y~duration"
+    - higher duration gives a positive effect on a client subscribing ***.
+
+"y~balance"
+    - higher account balance gives a negligible positve effect ***.
+
+f"y~{('+').join(cols)}"
+    - same story
+    - retired and higher education seems to have the strongest effects of
+    indicating they would buy term deposits.
+        job[T.retired]         0.3090**
+                               (0.1384)
+        education[T.tertiary]  0.3149***
+                               (0.0978)
+        default[T.yes]         0.2990*
+                               (0.1728)
+        balance                0.0000**
+                               (0.0000)
+
+Seems like anything that indicates lower risk tolerance means they are more
+likely to take on a term deposit.
+
+Could further test by random sampling the data into smaller pieces
+
+'''
 
 # %% [6A] Setup Data for ML
 '''
@@ -602,6 +707,26 @@ X_test_t_df = pd.DataFrame(
     columns=preprocessing.get_feature_names_out(),
     index=X_test.index)
 
+
+# %% Feature Importance
+
+# Train Random Forest
+rf = RandomForestClassifier(n_estimators=100, random_state=seed)
+rf.fit(X_train_t_df, y_train)
+
+# Get feature importance
+importance = rf.feature_importances_
+
+# Plot feature importance
+plt.figure(figsize=(16, 24))
+
+# Create a horizontal bar plot
+plt.barh([x for x in range(len(importance))], importance, color="skyblue")
+plt.xlabel("Importance Score")
+plt.ylabel("Feature Index")
+plt.title("Feature Importance from Random Forest")
+plt.yticks(range(len(importance)), labels=X_train_t_df.columns, fontsize=10)  # Adjust the fontsize as needed
+plt.show()
 # %% [6B] Setup Dimension Reduction
 '''
 dimension reduction
@@ -659,7 +784,7 @@ followed by low. This could be a decent spot as well.
 
 # Apply Reduction -------------------------------------------------------------
 svd = TruncatedSVD(
-    n_components=20,
+    n_components=22,
     random_state=seed
     )
 
@@ -670,6 +795,11 @@ X_test_t_df_dr = svd.fit_transform(X_test_t_df)
 # -----------------------------------------------------------------------------
 
 # %% [7A] Model Selection - Normal
+
+# drop duration
+X_train_t_df = X_train_t_df.drop(columns=['pipeline-1__duration'])
+X_test_t_df = X_test_t_df.drop(columns=['pipeline-1__duration'])
+
 
 # LazyPredict
 clf = LazyClassifier(
@@ -735,6 +865,38 @@ those with term deposits.
 
 NearestCentriod was able to correctly identify 1117 as having a term deposits,
 which is fairly close to the total 1448 in the test set, around 77%.
+
+
+Same Analysis, but with duration dropped....
+
+                               Accuracy  Balanced Accuracy  ROC AUC  F1 Score  Time Taken
+Model
+NearestCentroid                    0.67               0.63     0.63      0.75        0.23
+GaussianNB                         0.90               0.59     0.59      0.90        0.15
+ExtraTreeClassifier                0.88               0.55     0.55      0.88        0.15
+DecisionTreeClassifier             0.86               0.55     0.55      0.87        0.35
+LabelPropagation                   0.89               0.55     0.55      0.88       79.55
+LabelSpreading                     0.89               0.55     0.55      0.88       95.28
+Perceptron                         0.85               0.54     0.54      0.86        0.14
+BernoulliNB                        0.93               0.54     0.54      0.90        0.15
+ExtraTreesClassifier               0.92               0.54     0.54      0.90        4.47
+QuadraticDiscriminantAnalysis      0.45               0.54     0.54      0.56        0.19
+KNeighborsClassifier               0.93               0.54     0.54      0.90        1.96
+XGBClassifier                      0.93               0.54     0.54      0.90        1.23
+BaggingClassifier                  0.92               0.54     0.54      0.90        2.05
+PassiveAggressiveClassifier        0.86               0.53     0.53      0.87        0.14
+LinearDiscriminantAnalysis         0.93               0.53     0.53      0.90        0.32
+CalibratedClassifierCV             0.93               0.53     0.53      0.90       23.07
+RandomForestClassifier             0.93               0.52     0.52      0.90        4.53
+LGBMClassifier                     0.93               0.52     0.52      0.90        0.68
+SGDClassifier                      0.93               0.52     0.52      0.90        0.30
+AdaBoostClassifier                 0.93               0.52     0.52      0.90        1.92
+SVC                                0.93               0.52     0.52      0.90       55.05
+LogisticRegression                 0.93               0.51     0.51      0.90        0.20
+RidgeClassifier                    0.93               0.51     0.51      0.90        0.15
+RidgeClassifierCV                  0.93               0.51     0.51      0.90        0.23
+LinearSVC                          0.93               0.51     0.51      0.90        6.46
+DummyClassifier                    0.93               0.50     0.50      0.89        0.11
 '''
 # -----------------------------------------------------------------------------
 
@@ -790,88 +952,119 @@ DummyClassifier               0.00 1.00 0.00 1.00
 
 Otherwise, NearestCentroid and QuadraticDiscriminantAnalysis, both seem like
 good models.
+
+With duration dropped...
+
+                                tp   tn   fp   fn
+QuadraticDiscriminantAnalysis 0.64 0.44 0.56 0.36
+NearestCentroid               0.59 0.68 0.32 0.41
+GaussianNB                    0.23 0.95 0.05 0.77
+Perceptron                    0.19 0.90 0.10 0.81
+DecisionTreeClassifier        0.18 0.92 0.08 0.82
+ExtraTreeClassifier           0.17 0.93 0.07 0.83
+LabelPropagation              0.15 0.94 0.06 0.85
+LabelSpreading                0.15 0.95 0.05 0.85
+PassiveAggressiveClassifier   0.14 0.92 0.08 0.86
+ExtraTreesClassifier          0.10 0.98 0.02 0.90
+BernoulliNB                   0.09 0.99 0.01 0.91
+KNeighborsClassifier          0.08 0.99 0.01 0.92
+BaggingClassifier             0.08 0.99 0.01 0.92
+XGBClassifier                 0.08 0.99 0.01 0.92
+LinearDiscriminantAnalysis    0.06 1.00 0.00 0.94
+CalibratedClassifierCV        0.06 1.00 0.00 0.94
+RandomForestClassifier        0.05 1.00 0.00 0.95
+LGBMClassifier                0.05 1.00 0.00 0.95
+SGDClassifier                 0.04 1.00 0.00 0.96
+AdaBoostClassifier            0.04 1.00 0.00 0.96
+SVC                           0.03 1.00 0.00 0.97
+LogisticRegression            0.03 1.00 0.00 0.97
+RidgeClassifier               0.03 1.00 0.00 0.97
+RidgeClassifierCV             0.03 1.00 0.00 0.97
+LinearSVC                     0.02 1.00 0.00 0.98
+DummyClassifier               0.00 1.00 0.00 1.00
+
 '''
 # -----------------------------------------------------------------------------
 
 # %% [7B] Model Selection - Dimension Reduction
 
-# LazyPredict
-clf = LazyClassifier(
-    verbose=0,
-    ignore_warnings=True,
-    custom_metric=None,
-    predictions=True,
-    random_state=seed
-    )
+# # LazyPredict
+# clf = LazyClassifier(
+#     verbose=0,
+#     ignore_warnings=True,
+#     custom_metric=None,
+#     predictions=True,
+#     random_state=seed
+#     )
 
-lazymodels, predictions = clf.fit(
-    X_train_t_df_dr,
-    X_test_t_df_dr,
-    y_train,
-    y_test
-    )
+# lazymodels, predictions = clf.fit(
+#     X_train_t_df_dr,
+#     X_test_t_df_dr,
+#     y_train,
+#     y_test
+#     )
 
-lazymodels = pd.DataFrame(lazymodels)
+# lazymodels = pd.DataFrame(lazymodels)
 
-# Figure for cms
-fig_cm, axes = plt.subplots(9, 3, figsize=(24, 48))
+# # Figure for cms
+# fig_cm, axes = plt.subplots(9, 3, figsize=(24, 48))
 
-cm_results = {}
+# cm_results = {}
 
-# Get predictions for each model
-for i, ax in enumerate(axes.flat):
-    try:
-        # get model and pred data
-        model_name = predictions.keys()[i]
-        y_pred = predictions[model_name]
+# # Get predictions for each model
+# for i, ax in enumerate(axes.flat):
+#     try:
+#         # get model and pred data
+#         model_name = predictions.keys()[i]
+#         y_pred = predictions[model_name]
 
-        # Generate Confusion Matrix
-        cm = confusion_matrix(y_test, y_pred)
-        cm_results[model_name] = cm
+#         # Generate Confusion Matrix
+#         cm = confusion_matrix(y_test, y_pred)
+#         cm_results[model_name] = cm
 
-        # Plot Confusion Matrix
-        sns.heatmap(
-            cm,
-            annot=True,
-            fmt='d',
-            cmap='Blues',
-            xticklabels=['Pred: 0', 'Pred: 1'],
-            yticklabels=['True: 0', 'True: 1'],
-            ax=ax,
-            cbar=False  # Remove the colorbar
-            )
+#         # Plot Confusion Matrix
+#         sns.heatmap(
+#             cm,
+#             annot=True,
+#             fmt='d',
+#             cmap='Blues',
+#             xticklabels=['Pred: 0', 'Pred: 1'],
+#             yticklabels=['True: 0', 'True: 1'],
+#             ax=ax,
+#             cbar=False  # Remove the colorbar
+#             )
 
-        ax.set_title(f'Confusion Matrix for {model_name}')
-        ax.set_xlabel('Predicted Label')
-        ax.set_ylabel('True Label')
+#         ax.set_title(f'Confusion Matrix for {model_name}')
+#         ax.set_xlabel('Predicted Label')
+#         ax.set_ylabel('True Label')
 
-    except Exception:
-        ax.axis('off')
+#     except Exception:
+#         ax.axis('off')
 
-fig_cm.suptitle("Confusion Matrix Heatmap: LazyPredict", fontsize=16, y=1.02)
-plt.tight_layout()
-plt.show()
+# fig_cm.suptitle("Confusion Matrix Heatmap: LazyPredict", fontsize=16, y=1.02)
+# plt.tight_layout()
+# plt.show()
 
-'''
-Similar results to before. Same models are performing the best.
-'''
-# -----------------------------------------------------------------------------
+# '''
+# Similar results to before. Same models are performing the best.
+# '''
+# # -----------------------------------------------------------------------------
 
 # Closer Look at CM Results ---------------------------------------------------
-cm_ratios_df = pd.DataFrame(columns=['tp', 'tn', 'fp', 'fn'])
+# cm_ratios_df = pd.DataFrame(columns=['tp', 'tn', 'fp', 'fn'])
 
-for key, value in cm_results.items():
+# for key, value in cm_results.items():
 
-    tn, fp, fn, tp = value.flatten()
+#     tn, fp, fn, tp = value.flatten()
 
-    cm_ratios_df.loc[key] = {
-            'tp': tp / (tp + fn) if (tp + fn) > 0 else 0,
-            'tn': tn / (tn + fp) if (tn + fp) > 0 else 0,
-            'fp': fp / (fp + tn) if (fp + tn) > 0 else 0,
-            'fn': fn / (fn + tp) if (fn + tp) > 0 else 0
-        }
+#     cm_ratios_df.loc[key] = {
+#             'tp': tp / (tp + fn) if (tp + fn) > 0 else 0,
+#             'tn': tn / (tn + fp) if (tn + fp) > 0 else 0,
+#             'fp': fp / (fp + tn) if (fp + tn) > 0 else 0,
+#             'fn': fn / (fn + tp) if (fn + tp) > 0 else 0
+#         }
 
-cm_ratios_df.sort_values(by='tp', ascending=False)
+# cm_ratios_df.sort_values(by='tp', ascending=False)
 
 '''
 
@@ -1095,15 +1288,15 @@ confusion_matricies = dict(
     map(lambda x: get_confusion_matricies(x), fitted_models)
     )
 
-cv_results = {
-    x: fitted_models[x].cv_results_
-    for x in fitted_models if x not in ['Voting', 'Stacking']
-}
+# cv_results = {
+#     x: fitted_models[x].cv_results_
+#     for x in fitted_models if x not in ['Voting', 'Stacking']
+# }
 
-best_parameters = {
-    x: fitted_models[x].best_params_
-    for x in fitted_models if x not in ['Voting', 'Stacking']
-    }
+# best_parameters = {
+#     x: fitted_models[x].best_params_
+#     for x in fitted_models if x not in ['Voting', 'Stacking']
+#     }
 
 '''
 It seems like I'm able to hit that average performance score of 81%?
@@ -1234,8 +1427,8 @@ cm = confusion_matrix(y_test, y_pred)
 '''
 Optimizing using TP score gave us...
 
-array([[23430,  2543],
-       [  635,  1392]], dtype=int64)
+array([[16708,  1844],
+       [  454,   994]], dtype=int64)
 
 Which is decent, but a pretty large increase in false positives as well.
 
