@@ -14,9 +14,11 @@ import os
 # Core Data Handling
 import numpy as np
 import pandas as pd
+import duckdb as db
 
 # Visualization
 import matplotlib.pyplot as plt
+from matplotlib import cm
 import seaborn as sns
 
 # Statistical Modeling
@@ -48,6 +50,7 @@ from sklearn.linear_model import Perceptron
 
 # dimension reduction
 from sklearn.decomposition import TruncatedSVD
+from sklearn.decomposition import PCA
 
 # optimization
 from sklearn.model_selection import GridSearchCV
@@ -68,6 +71,16 @@ from hyperopt import fmin, tpe, hp, STATUS_OK
 from hyperopt.pyll.base import scope
 from hyperopt import space_eval
 import optuna
+
+# unsupervised models
+import gower
+from sklearn.cluster import KMeans
+import scipy.cluster.hierarchy as sch
+from scipy.cluster.hierarchy import fcluster
+from sklearn.cluster import DBSCAN
+
+# unsupervised metrics
+from sklearn.metrics import silhouette_score
 
 # %% [2] Background
 '''
@@ -174,13 +187,9 @@ os.chdir(path)
 
 df = pd.read_csv('term-deposit-marketing-2020.csv')
 
-# %% [4] Exploratory
-
 # Setup -----------------------------------------------------------------------
-df.describe()
 
-# Check Categorical Numbers
-
+# Check Categorical Numbers ---------------------------------------------------
 _cols_categorical = [
     col for col, dtype in df.dtypes.items() if dtype == 'O' and col != 'y'
     ]
@@ -188,6 +197,12 @@ _cols_categorical = [
 _cols_numerical = [
     col for col, dtype in df.dtypes.items() if not dtype == 'O' and col != 'y'
     ]
+# -----------------------------------------------------------------------------
+
+# %% [4] Exploratory
+
+# Describe --------------------------------------------------------------------
+df.describe()
 # -----------------------------------------------------------------------------
 
 # Corr Matrix -----------------------------------------------------------------
@@ -201,7 +216,6 @@ plt.show()
 duration is the most prominant feature.
     - balance has a weak effect...
 '''
-
 # -----------------------------------------------------------------------------
 
 # Bar Plots -------------------------------------------------------------------
@@ -515,7 +529,7 @@ reg6 = 'duration~y'
 reg_results[reg6] = smf.ols(reg6, data=df).fit()
 # -----------------------------------------------------------------------------
 
-summary_col(reg_results[reg6], stars=True, float_format='%0.4f')
+summary_col(reg_results[reg5], stars=True, float_format='%0.4f')
 
 '''
 "duration~job"
@@ -937,12 +951,10 @@ num_pipeline = make_pipeline(
     StandardScaler()
 )
 
-
 cat_pipeline = make_pipeline(
     SimpleImputer(strategy="most_frequent"),
     OneHotEncoder(handle_unknown='ignore', sparse_output=False),
 )
-
 
 # Create Preprocessing variable to apply pipelines
 preprocessing = make_column_transformer(
@@ -1404,3 +1416,1394 @@ plt.title("Feature Importance from Optuna:XGB")
 plt.yticks(range(len(importance)), labels=X_train_t_df.columns, fontsize=10)
 plt.show()
 # -----------------------------------------------------------------------------
+
+# %% [12] Model Implementation - Second Layer Full Dataset
+
+'''
+Use NearestCentriod and run on entire trimmed dataset.
+'''
+
+# NearestCentroid -------------------------------------------------------------
+param_grid = {
+    'metric': ['euclidean', 'manhattan'],
+    'shrink_threshold': [None, 0.001, 0.01, 0.2, 0.5]
+}
+
+model = GridSearchCV(
+    NearestCentroid(),
+    param_grid,
+    cv=5,
+    scoring='balanced_accuracy',
+    n_jobs=-1
+    )
+
+model = model.fit(X_train_t_df, y_train)
+# -----------------------------------------------------------------------------
+
+# Results ---------------------------------------------------------------------
+y_pred = model.predict(X_trim_df)
+acc_result = accuracy_score(y, y_pred)
+cm_result = confusion_matrix(y, y_pred)
+cv_results = model.cv_results_
+# -----------------------------------------------------------------------------
+
+# CM Plot ---------------------------------------------------------------------
+plt.figure(figsize=(8, 8))
+
+sns.heatmap(cm_result, annot=True, fmt='d', cmap='Blues', cbar=False,
+            xticklabels=['Pred: 0', 'Pred: 1'],
+            yticklabels=['True: 0', 'True: 1'],
+            )
+plt.title("NearestCentriod:FullTrimmedDF")
+plt.show()
+# -----------------------------------------------------------------------------
+
+duration_calc = X[y_pred == 1]['duration']
+
+hours_model = sum(duration_calc) / 120
+hours_trimmed = sum(X["duration"]) / 120
+hours_total = sum(df["duration"]) / 120
+
+print(f'{hours_model:,.2f} hours calling only pred 1')
+print(f'{hours_trimmed:,.2f} hours calling everyone in trimmed')
+print(f'{hours_total:,.2f} hours calling everyone')
+print(f'From trimming we save {hours_total - hours_trimmed:,.2f} hours.')
+
+print(f'''From using the model we save an additional
+      {hours_trimmed - hours_model:,.2f}''')
+
+print(f'From using the model we save overall {hours_total - hours_model:,.2f}')
+
+print(f'''Trade off from using the model is that we spend about 56,824.73 hours
+      less on the phone, but lose about {sum(y) - cm_result[1,1]} subscribers,
+      but then spend only {hours_model:,.2f} hours on the phone to get
+      {cm_result[1,1]} subscribers.
+      ''')
+
+# %% [13] Unsupervised model - kmeans
+
+'''
+What kind of groups can we see in the subscribers?
+'''
+
+# DuckDB ----------------------------------------------------------------------
+'''
+Use duckDB to filter data to only subscribers.
+'''
+
+df_subscribers = db.sql("SELECT * FROM df WHERE y = 'yes'").fetchdf()
+# -----------------------------------------------------------------------------
+
+# Setup Data for Unsupervised ML ----------------------------------------------
+df_subscribers = df_subscribers.drop(columns=['y'])
+
+# Transform and Encode
+df_subscribers_encoded = preprocessing.fit_transform(df_subscribers)
+
+df_subscribers_encoded_df = pd.DataFrame(
+    df_subscribers_encoded,
+    columns=preprocessing.get_feature_names_out(),
+    index=df_subscribers.index)
+# -----------------------------------------------------------------------------
+
+# Truncated SVD ---------------------------------------------------------------
+svd = TruncatedSVD(
+    n_components=min(df_subscribers_encoded_df.shape)-1,
+    random_state=seed
+    )
+
+svd.fit(df_subscribers_encoded_df)
+
+explained_variance = svd.explained_variance_ratio_
+cumulative_variance = explained_variance.cumsum()
+
+plt.figure(figsize=(8, 5))
+
+plt.plot(
+    range(1, len(cumulative_variance) + 1), cumulative_variance, marker='o'
+    )
+
+plt.title('Cumulative Explained Variance for SVD')
+plt.xlabel('Number of Components')
+plt.ylabel('Cumulative Explained Variance')
+plt.axhline(y=0.95, color='r', linestyle='--')  # Threshold line at 95%
+plt.grid()
+
+# Set x-ticks to show all components
+plt.xticks(range(1, len(cumulative_variance) + 1), fontsize=8)
+
+# Offset every other x-tick up and down
+for i, tick in enumerate(plt.gca().get_xticklabels()):
+    if i % 2 == 0:  # Adjust only even-indexed ticks
+        tick.set_y(tick.get_position()[1] - 0.01)
+    else:
+        tick.set_y(tick.get_position()[1] + 0.01)
+
+plt.show()
+
+'''
+22 components is best for this dataset based on the graph
+However, there is a little bit of an elbow around 8 components, high variance
+followed by low. This could be a decent spot as well.
+'''
+# -----------------------------------------------------------------------------
+
+# Apply Reduction -------------------------------------------------------------
+svd = TruncatedSVD(
+    n_components=22,
+    random_state=seed
+    )
+
+svd.fit(df_subscribers_encoded_df)
+
+df_subscribers_encoded_df_reduction = svd.fit_transform(
+    df_subscribers_encoded_df
+    )
+# -----------------------------------------------------------------------------
+
+# PCA Reduction----------------------------------------------------------------
+pca = PCA(n_components=2)
+pca_result = pca.fit_transform(df_subscribers_encoded_df_reduction)
+# -----------------------------------------------------------------------------
+
+# kmeans ----------------------------------------------------------------------
+distortions = []
+for k in range(1, 10):
+    kmeans = KMeans(n_clusters=k, random_state=seed)
+    kmeans.fit(pca_result)
+    distortions.append(kmeans.inertia_)
+
+plt.plot(range(1, 10), distortions)
+plt.xlabel('Number of clusters')
+plt.ylabel('Distortion')
+plt.title('Scores')
+plt.show()
+
+'''
+Inertia scoring, seeing when the drop off happens to determine the optimal
+number of clusters.
+    - happens at 3.
+'''
+# -----------------------------------------------------------------------------
+
+# Plot K-means ----------------------------------------------------------------
+kmeans = KMeans(n_clusters=3, random_state=seed)  # Change number of clusters as needed
+kmeans.fit(pca_result)
+labels = kmeans.labels_
+
+plt.figure(figsize=(8, 6))
+
+plt.scatter(
+    pca_result[:, 0],
+    pca_result[:, 1],
+    c=labels,
+    cmap='viridis',
+    edgecolor='k',
+    alpha=0.7
+    )
+
+plt.title('TruncatedSVD + PCA + K-means Clustering')
+plt.xlabel('Principal Component 1')
+plt.ylabel('Principal Component 2')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+'''
+Pretty much seeing one blob with some outliers. Not really any distinct groups
+within subscribers...
+
+- tried with and without TruncatedSVD, saw no changes
+'''
+# -----------------------------------------------------------------------------
+
+# Most Common Features --------------------------------------------------------
+
+
+def return_common_features(df):
+    result = pd.DataFrame()
+
+    for col in df.columns:
+        mode_value = df[col].mode().iloc[0]
+        mode_count = df[col].value_counts().iloc[0]
+        result[col] = [mode_value, mode_count]
+        result.index = ['most_common', 'common_count']
+
+    describe_df = df.describe()
+    result = pd.concat([result, describe_df])
+
+    return result
+
+
+# variables
+label_groups_df = []
+df_subscribers['label'] = labels
+
+# seperate groups
+for label in set(labels):
+
+    label_groups_df.append(
+        df_subscribers[df_subscribers['label'] == label]
+        )
+
+common_features = list(map(return_common_features, label_groups_df))
+common_features.append(return_common_features(df_subscribers))
+'''
+Nothing immedietly distinct between the groups...
+'''
+# -----------------------------------------------------------------------------
+
+# Combine DataFrames ----------------------------------------------------------
+'''
+I want to combine and tag my dataframes for each group, so I can plot them.
+'''
+
+count = 1
+for group in label_groups_df:
+    group['id'] = count
+    count += 1
+
+df_subscribers['id'] = 4
+label_groups_df.append(df_subscribers)
+groups_df = pd.concat(label_groups_df)
+# -----------------------------------------------------------------------------
+
+# Violin Plots With Each Group ------------------------------------------------
+fig_violin, axes = plt.subplots(3, 2, figsize=(8, 8))
+for i, ax in enumerate(axes.flat):
+    try:
+
+        _col = _cols_numerical[i]
+
+        cutoff = {
+            'balance': 10000,
+            'duration': 2000,
+            'campaign': 10
+            }
+
+        if _col in cutoff.keys():
+
+            rows = groups_df[_col] < int(cutoff[_col])
+            _ydata = groups_df.loc[rows, _col]
+            _xdata = groups_df.loc[rows, 'id']
+
+        else:
+            _ydata = groups_df.loc[:, _col]
+            _xdata = groups_df['id']
+
+        sns.violinplot(x=_xdata, y=_ydata, ax=ax)
+        ax.set_title(f"{_col}")
+
+    except Exception:
+        ax.axis('off')
+
+plt.tight_layout()
+fig_violin.suptitle("Violin Plots of Numeric")
+plt.show()
+
+'''
+Blue group
+    - mostly middle aged, low balance, higher average duration (8-30 mins),
+    much more spread out campaign calls.
+
+Orange group
+    - middle to younger, low balance, shorter duration calls, less campaigns
+
+Green group
+    - older aged, spread out balances, shorter to mid duration, slighly more
+    spread out calls.
+
+Note groups are uneven, 1 ~ 700, 2 ~ 1400, 3 ~ 700...
+
+Seems like group 1 comprises of middle aged persons who require more calls and
+have a more through last discussion?
+
+Group 2 would be a slighly younger group than 1, but requires less calls, time,
+to make a decision.
+
+Group 3 seems like an older group with more money, they tend to vary in the
+number of repeated calls.
+'''
+# -----------------------------------------------------------------------------
+
+# Grouped Bar Plots -----------------------------------------------------------
+fig, axes = plt.subplots(4, 2, figsize=(16, 16))
+axes_flat = axes.flatten()
+
+for ax, column in zip(axes_flat, _cols_categorical):
+    _group = groups_df.groupby([column, 'id'])[column].count()
+    _group.name = 'value'
+    _data = _group.reset_index()
+
+    _pivot = _data.pivot_table(
+        index=_data.columns[0],
+        columns=_data.columns[1],
+        values='value'
+        )
+
+    _pivot.plot(kind='bar', stacked=False, ax=ax)
+
+    ax.set_title(f'Count of {column.upper()}')
+    ax.set_xlabel('Categories')
+    ax.set_ylabel('Count of Category')
+
+fig.suptitle("Bar Plots of Categorical", fontsize=16, y=1.00)
+plt.tight_layout()
+plt.show()
+
+'''
+Blue Group
+    -mostly blue collar, management, technician, admin
+    -married
+    -secondary education
+    - half/half for housing loans
+
+Orange Group
+    -more management, blue collar, technician, admin
+    -more single
+    -secondary
+    - half/half for housing loans
+
+Green Group
+    -same as other groups for employment
+    -more married
+    -even education?
+    -this group has mostly no housing loans
+'''
+# -----------------------------------------------------------------------------
+
+'''
+Seems like group are largely similar with some slight differences...
+    - age, balance, campaign, housing loans, marital status seem like the
+    big differences.
+'''
+
+# %% [14] Higher Order Clustering
+'''
+Gower's distance allows us to compare across mixed data types better.
+
+We can use...
+- k-prototypes
+- Agglomerative Hierarchical Clustering + Gower’s Distanc
+- DBSCAN + Gower’s Distance
+- Gaussian Mixture Models (GMM)
+'''
+# setup data ------------------------------------------------------------------
+'''
+I want to setup gower matrix, so I can compare across different data types
+better.
+
+Then dimension reduction to 2 points to see if any clear groups form from
+labeling.
+'''
+
+gower_distance_matrix = gower.gower_matrix(df_subscribers_encoded_df)
+pca = PCA(n_components=2)
+pca_gower_result = pca.fit_transform(gower_distance_matrix)
+
+# -----------------------------------------------------------------------------
+
+# Optimal Clusters ------------------------------------------------------------
+distortions = []
+for k in range(1, 10):
+    kmeans = KMeans(n_clusters=k, random_state=seed)
+    kmeans.fit(pca_gower_result)
+    distortions.append(kmeans.inertia_)
+
+plt.plot(range(1, 10), distortions)
+plt.xlabel('Number of clusters')
+plt.ylabel('Distortion')
+plt.title('Scores')
+plt.show()
+
+'''
+With the gower+pca data, it seems like 5 groups is most optimal.
+'''
+# -----------------------------------------------------------------------------
+
+# Convert to DF ---------------------------------------------------------------
+'''
+To make adding labels, ids, clusters, etc, easier.
+'''
+pca_gower_result = pd.DataFrame(pca_gower_result)
+# -----------------------------------------------------------------------------
+
+# gower + kmeans -------------------------------------------------------------
+'''
+If I do 3 groups instead of 5, I actually get similar grouping as the next
+model, hierarchical. But 5 should be better.
+'''
+
+kmeans = KMeans(n_clusters=5, random_state=seed)
+kmeans.fit(gower_distance_matrix)
+
+label_df = df_subscribers.copy()
+label_df['id'] = kmeans.labels_
+
+# Violin
+fig_violin, axes = plt.subplots(3, 2, figsize=(8, 8))
+for i, ax in enumerate(axes.flat):
+    try:
+
+        _col = _cols_numerical[i]
+
+        cutoff = {
+            'balance': 10000,
+            'duration': 2000,
+            'campaign': 10
+            }
+
+        if _col in cutoff.keys():
+
+            rows = label_df[_col] < int(cutoff[_col])
+            _ydata = label_df.loc[rows, _col]
+            _xdata = label_df.loc[rows, 'id']
+
+        else:
+            _ydata = label_df.loc[:, _col]
+            _xdata = label_df['id']
+
+        sns.violinplot(x=_xdata, y=_ydata, ax=ax)
+        ax.set_title(f"{_col}")
+
+    except Exception:
+        ax.axis('off')
+
+plt.tight_layout()
+fig_violin.suptitle("Violin Plots of Numeric")
+plt.show()
+
+# Bar plots
+fig, axes = plt.subplots(4, 2, figsize=(16, 16))
+axes_flat = axes.flatten()
+
+for ax, column in zip(axes_flat, _cols_categorical):
+    _group = label_df.groupby([column, 'id'])[column].count()
+    _group.name = 'value'
+    _data = _group.reset_index()
+
+    _pivot = _data.pivot_table(
+        index=_data.columns[0],
+        columns=_data.columns[1],
+        values='value'
+        )
+
+    _pivot.plot(kind='bar', stacked=False, ax=ax)
+
+    ax.set_title(f'Count of {column.upper()}')
+    ax.set_xlabel('Categories')
+    ax.set_ylabel('Count of Category')
+
+fig.suptitle("Bar Plots of Categorical", fontsize=16, y=1.00)
+plt.tight_layout()
+plt.show()
+
+# 2D plot ---------------------------------------------------------------------
+pca_gower_result['id'] = kmeans.labels_
+
+plt.figure(figsize=(8, 6))
+
+plt.scatter(
+    pca_gower_result.loc[:, 0],
+    pca_gower_result.loc[:, 1],
+    c=pca_gower_result['id'],
+    cmap='viridis',
+    edgecolor='k',
+    alpha=0.7
+    )
+
+plt.title('gower + kmeans')
+plt.xlabel('Principal Component 1')
+plt.ylabel('Principal Component 2')
+plt.legend()
+plt.grid(True)
+plt.show()
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+
+# gower + hierarchical --------------------------------------------------------
+Z = sch.linkage(gower_distance_matrix, method='ward')
+
+# Assuming Z is your linkage matrix
+plt.figure(figsize=(10, 7))
+dendrogram = sch.dendrogram(Z, no_labels=True)  # Suppress default labels
+plt.title('Hierarchical Clustering Dendrogram')
+plt.xlabel('Sample Index')
+plt.ylabel('Distance')
+plt.show()
+
+# Apply flat clustering
+'''
+At around height 60, we see the three groups form. So we set our clusters aroun
+-d that height.
+'''
+clusters = fcluster(Z, t=65, criterion='distance')
+
+# Add the hierarchical cluster labels to the dataframe
+label_df['cluster'] = clusters
+label_df['cluster'] = label_df['cluster'].replace({2: 1, 1: 2})
+
+# violin plots
+fig_violin, axes = plt.subplots(3, 2, figsize=(8, 8))
+for i, ax in enumerate(axes.flat):
+    try:
+
+        _col = _cols_numerical[i]
+
+        cutoff = {
+            'balance': 10000,
+            'duration': 2000,
+            'campaign': 10
+            }
+
+        if _col in cutoff.keys():
+
+            rows = label_df[_col] < int(cutoff[_col])
+            _ydata = label_df.loc[rows, _col]
+            _xdata = label_df.loc[rows, 'cluster']
+
+        else:
+            _ydata = label_df.loc[:, _col]
+            _xdata = label_df['cluster']
+
+        sns.violinplot(x=_xdata, y=_ydata, ax=ax)
+        ax.set_title(f"{_col}")
+
+    except Exception:
+        ax.axis('off')
+
+plt.tight_layout()
+fig_violin.suptitle("Violin Plots of Numeric")
+plt.show()
+
+# Bar plots
+fig, axes = plt.subplots(4, 2, figsize=(16, 16))
+axes_flat = axes.flatten()
+
+for ax, column in zip(axes_flat, _cols_categorical):
+    _group = label_df.groupby([column, 'cluster'])[column].count()
+    _group.name = 'value'
+    _data = _group.reset_index()
+
+    _pivot = _data.pivot_table(
+        index=_data.columns[0],
+        columns=_data.columns[1],
+        values='value'
+        )
+
+    _pivot.plot(kind='bar', stacked=False, ax=ax)
+
+    ax.set_title(f'Count of {column.upper()}')
+    ax.set_xlabel('Categories')
+    ax.set_ylabel('Count of Category')
+
+fig.suptitle("Bar Plots of Categorical", fontsize=16, y=1.00)
+plt.tight_layout()
+plt.show()
+
+'''
+Found the same groups? Group 1 from gower+kmeans looks the same as Group 2
+from gower+hei, I've now swapped the group numbers, they look identical.
+    - in both violin and bar plots they look very similar.
+
+Indicates robustness, good definition of groups if two models make very similar
+groups.
+'''
+
+# 2D plot
+pca_gower_result['cluster'] = clusters
+
+plt.figure(figsize=(8, 6))
+
+plt.scatter(
+    pca_gower_result.loc[:, 0],
+    pca_gower_result.loc[:, 1],
+    c=pca_gower_result['cluster'],
+    cmap='viridis',
+    edgecolor='k',
+    alpha=0.7
+    )
+
+plt.title('gower + hierarchical')
+plt.xlabel('Principal Component 1')
+plt.ylabel('Principal Component 2')
+plt.legend()
+plt.grid(True)
+plt.show()
+# -----------------------------------------------------------------------------
+
+# gower + DBSCAN --------------------------------------------------------------
+
+# Apply DBSCAN clustering
+dbscan = DBSCAN(eps=1.5, min_samples=4, n_jobs=-1)
+labels = dbscan.fit_predict(gower_distance_matrix)
+
+# Add cluster labels to dataset
+label_df['db_cluster'] = labels
+
+# violin plots
+fig_violin, axes = plt.subplots(3, 2, figsize=(8, 8))
+for i, ax in enumerate(axes.flat):
+    try:
+
+        _col = _cols_numerical[i]
+
+        cutoff = {
+            'balance': 10000,
+            'duration': 2000,
+            'campaign': 10
+            }
+
+        if _col in cutoff.keys():
+
+            rows = label_df[_col] < int(cutoff[_col])
+            _ydata = label_df.loc[rows, _col]
+            _xdata = label_df.loc[rows, 'db_cluster']
+
+        else:
+            _ydata = label_df.loc[:, _col]
+            _xdata = label_df['db_cluster']
+
+        sns.violinplot(x=_xdata, y=_ydata, ax=ax)
+        ax.set_title(f"{_col}")
+
+    except Exception:
+        ax.axis('off')
+
+plt.tight_layout()
+fig_violin.suptitle("Violin Plots of Numeric")
+plt.show()
+
+# Bar plots
+fig, axes = plt.subplots(4, 2, figsize=(16, 16))
+axes_flat = axes.flatten()
+
+for ax, column in zip(axes_flat, _cols_categorical):
+    _group = label_df.groupby([column, 'db_cluster'])[column].count()
+    _group.name = 'value'
+    _data = _group.reset_index()
+
+    _pivot = _data.pivot_table(
+        index=_data.columns[0],
+        columns=_data.columns[1],
+        values='value'
+        )
+
+    _pivot.plot(kind='bar', stacked=False, ax=ax)
+
+    ax.set_title(f'Count of {column.upper()}')
+    ax.set_xlabel('Categories')
+    ax.set_ylabel('Count of Category')
+
+fig.suptitle("Bar Plots of Categorical", fontsize=16, y=1.00)
+plt.tight_layout()
+plt.show()
+
+# 2d plot
+pca_gower_result['db_cluster'] = labels
+
+plt.figure(figsize=(8, 6))
+
+plt.scatter(
+    pca_gower_result.loc[:, 0],
+    pca_gower_result.loc[:, 1],
+    c=pca_gower_result['db_cluster'],
+    cmap='viridis',
+    edgecolor='k',
+    alpha=0.7
+    )
+
+plt.title('gower + dbscan')
+plt.xlabel('Principal Component 1')
+plt.ylabel('Principal Component 2')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+
+'''
+Very hard to tune to get similar clusters from before... Probably uneccesary to
+use.
+'''
+# %% [15] More Feature Engineering
+
+'''
+I want to drop features that are similar or the same mostly across the subscri
+ber dataset.
+    - loan: 2516 out of 2896 have no loan (86%), in prior plots we don't see differe
+    nt groups having largely different loan amounts.
+    - contact: majority are just cell phone, and the rest are 'unknown'.
+    - default: majority have no defaults, no groups in prior plots seem
+    to indicate anything useful.
+'''
+
+features_describe = return_common_features(df_subscribers)
+
+subscribers_clean = df_subscribers.drop(
+    columns=['loan', 'contact', 'default']
+    )
+
+subscribers_clean_encoded = preprocessing.fit_transform(subscribers_clean)
+
+subscribers_clean_encoded_df = pd.DataFrame(
+    subscribers_clean_encoded,
+    columns=preprocessing.get_feature_names_out(),
+    index=df_subscribers.index)
+
+gower_distance_matrix = gower.gower_matrix(subscribers_clean_encoded_df)
+pca = PCA(n_components=2)
+pca_gower_clean_result = pca.fit_transform(gower_distance_matrix)
+
+# Optimal Clusters ------------------------------------------------------------
+distortions = []
+for k in range(1, 10):
+    kmeans = KMeans(n_clusters=k, random_state=seed)
+    kmeans.fit(pca_gower_clean_result)
+    distortions.append(kmeans.inertia_)
+
+plt.plot(range(1, 10), distortions)
+plt.xlabel('Number of clusters')
+plt.ylabel('Distortion')
+plt.title('Scores')
+plt.show()
+
+'''
+With the gower+pca data, it seems like 7 groups is most optimal.
+'''
+# -----------------------------------------------------------------------------
+
+# Convert to DF ---------------------------------------------------------------
+'''
+To make adding labels, ids, clusters, etc, easier.
+'''
+pca_gower_clean_result = pd.DataFrame(pca_gower_clean_result)
+# -----------------------------------------------------------------------------
+
+# gower + kmeans -------------------------------------------------------------
+'''
+'''
+
+kmeans = KMeans(n_clusters=5, random_state=seed)
+kmeans.fit(pca_gower_clean_result)
+
+label_df = subscribers_clean.copy()
+label_df['id'] = kmeans.labels_
+pca_gower_clean_result['id'] = kmeans.labels_
+
+# Violin
+fig_violin, axes = plt.subplots(3, 2, figsize=(8, 8))
+for i, ax in enumerate(axes.flat):
+    try:
+
+        _col = _cols_numerical[i]
+
+        cutoff = {
+            'balance': 10000,
+            'duration': 2000,
+            'campaign': 10
+            }
+
+        if _col in cutoff.keys():
+
+            rows = label_df[_col] < int(cutoff[_col])
+            _ydata = label_df.loc[rows, _col]
+            _xdata = label_df.loc[rows, 'id']
+
+        else:
+            _ydata = label_df.loc[:, _col]
+            _xdata = label_df['id']
+
+        sns.violinplot(x=_xdata, y=_ydata, ax=ax)
+        ax.set_title(f"{_col}")
+
+    except Exception:
+        ax.axis('off')
+
+plt.tight_layout()
+fig_violin.suptitle("Violin Plots of Numeric")
+plt.show()
+
+# Bar plots
+fig, axes = plt.subplots(2, 2, figsize=(16, 16))
+axes_flat = axes.flatten()
+
+for ax, column in zip(axes_flat, ['job', 'marital', 'education', 'housing']):
+    try:
+        _group = label_df.groupby([column, 'id'])[column].count()
+        _group.name = 'value'
+        _data = _group.reset_index()
+
+        _pivot = _data.pivot_table(
+            index=_data.columns[0],
+            columns=_data.columns[1],
+            values='value'
+            )
+
+        _pivot.plot(kind='bar', stacked=False, ax=ax)
+
+        ax.set_title(f'Count of {column.upper()}')
+        ax.set_xlabel('Categories')
+        ax.set_ylabel('Count of Category')
+    except Exception:
+        ax.axis('off')
+
+fig.suptitle("Bar Plots of Categorical", fontsize=16, y=1.00)
+plt.tight_layout()
+plt.show()
+
+# 2D plot ---------------------------------------------------------------------
+plt.figure(figsize=(8, 6))
+
+plt.scatter(
+    pca_gower_clean_result.loc[:, 0],
+    pca_gower_clean_result.loc[:, 1],
+    c=pca_gower_clean_result['id'],
+    cmap='viridis',
+    edgecolor='k',
+    alpha=0.7
+    )
+
+plt.title('gower + kmeans')
+plt.xlabel('Principal Component 1')
+plt.ylabel('Principal Component 2')
+plt.legend()
+plt.grid(True)
+plt.show()
+# -----------------------------------------------------------------------------
+
+# DBSCAN ----------------------------------------------------------------------
+# Apply DBSCAN clustering
+dbscan = DBSCAN(eps=0.3, min_samples=25, n_jobs=-1)
+
+pca_gower_clean_result = pca.fit_transform(gower_distance_matrix)
+labels = dbscan.fit_predict(pca_gower_clean_result)
+pca_gower_clean_result = pd.DataFrame(pca_gower_clean_result)
+pca_gower_clean_result['id'] = kmeans.labels_
+
+
+# Add cluster labels to dataset
+label_df['db_cluster'] = labels
+
+# violin plots
+fig_violin, axes = plt.subplots(3, 2, figsize=(8, 8))
+for i, ax in enumerate(axes.flat):
+    try:
+
+        _col = _cols_numerical[i]
+
+        cutoff = {
+            'balance': 10000,
+            'duration': 2000,
+            'campaign': 10
+            }
+
+        if _col in cutoff.keys():
+
+            rows = label_df[_col] < int(cutoff[_col])
+            _ydata = label_df.loc[rows, _col]
+            _xdata = label_df.loc[rows, 'db_cluster']
+
+        else:
+            _ydata = label_df.loc[:, _col]
+            _xdata = label_df['db_cluster']
+
+        sns.violinplot(x=_xdata, y=_ydata, ax=ax)
+        ax.set_title(f"{_col}")
+
+    except Exception:
+        ax.axis('off')
+
+plt.tight_layout()
+fig_violin.suptitle("Violin Plots of Numeric")
+plt.show()
+
+# Bar plots
+fig, axes = plt.subplots(2, 2, figsize=(16, 16))
+axes_flat = axes.flatten()
+
+for ax, column in zip(axes_flat, ['job', 'marital', 'education', 'housing']):
+    try:
+        _group = label_df.groupby([column, 'db_cluster'])[column].count()
+        _group.name = 'value'
+        _data = _group.reset_index()
+
+        _pivot = _data.pivot_table(
+            index=_data.columns[0],
+            columns=_data.columns[1],
+            values='value'
+            )
+
+        _pivot.plot(kind='bar', stacked=False, ax=ax)
+
+        ax.set_title(f'Count of {column.upper()}')
+        ax.set_xlabel('Categories')
+        ax.set_ylabel('Count of Category')
+    except Exception:
+        ax.axis('off')
+
+fig.suptitle("Bar Plots of Categorical", fontsize=16, y=1.00)
+plt.tight_layout()
+plt.show()
+
+# Add cluster labels to dataset
+label_df['db_cluster'] = labels
+
+# 2d plot
+pca_gower_clean_result['db_cluster'] = labels
+
+plt.figure(figsize=(8, 6))
+
+plt.scatter(
+    pca_gower_clean_result.loc[:, 0],
+    pca_gower_clean_result.loc[:, 1],
+    c=pca_gower_clean_result['db_cluster'],
+    cmap='viridis',
+    edgecolor='k',
+    alpha=0.7
+    )
+
+plt.title('gower + dbscan')
+plt.xlabel('Principal Component 1')
+plt.ylabel('Principal Component 2')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# %% [16] Explore Groups
+
+# variables
+label_groups_df = {}
+
+# Create Measures Per Group/Label ---------------------------------------------
+# seperate groups
+for label in set(label_df['db_cluster']):
+    label_groups_df[label] = label_df[label_df['db_cluster'] == label]
+
+def apply_measures(key, df):
+    result = pd.DataFrame()
+
+    for col in df.columns:
+        mode_value = df[col].mode().iloc[0]
+        mode_count = df[col].value_counts().iloc[0]
+        result[col] = [mode_value, mode_count]
+        result.index = ['most_common', 'common_count']
+
+    describe_df = df.describe()
+    result = pd.concat([result, describe_df])
+    return [key, result]
+
+
+common_features_2 = dict(map(
+    lambda x: apply_measures(x[0], x[1]), label_groups_df.items())
+    )
+
+# Create Centriods and Adjust -------------------------------------------------
+centroids = {}
+
+for label in pca_gower_clean_result.id:
+    temp = pca_gower_clean_result[pca_gower_clean_result['id'] == label]
+    centroids[label] = (temp[0].mean(), temp[1].mean())
+
+
+def adjust_centroids(centroids, min_distance):
+    """
+    Adjust centroids if they are too close to each other by adding a margin.
+
+    Parameters:
+    - centroids: A dictionary where keys are labels and values are 2D
+    centroids (x, y).
+    - min_distance: The minimum allowed distance between any two centroids.
+
+    Returns:
+    - Adjusted centroids with the margin added.
+    """
+    labels = list(centroids.keys())
+    adjusted_centroids = centroids.copy()
+
+    for i in range(len(labels)):
+        for j in range(i + 1, len(labels)):
+            label_i = labels[i]
+            label_j = labels[j]
+            centroid_i = np.array(centroids[label_i])
+            centroid_j = np.array(centroids[label_j])
+
+            dist = np.linalg.norm(centroid_i - centroid_j)
+            if dist < min_distance:
+                # Calculate the direction vector and normalize it
+                direction = centroid_j - centroid_i
+                direction /= np.linalg.norm(direction)
+
+                # Add margin to the centroids in opposite directions
+                margin_vector = direction * (min_distance - dist) / 2
+                adjusted_centroids[label_i] = tuple(centroid_i - margin_vector)
+                adjusted_centroids[label_j] = tuple(centroid_j + margin_vector)
+
+    return adjusted_centroids
+
+
+# Example usage
+min_distance = 2  # Minimum distance to maintain
+
+adjusted_centroids = adjust_centroids(centroids, min_distance)
+# -----------------------------------------------------------------------------
+
+# %% gover+dbscan:ReducedFeatures
+
+indexes_list = [
+    ['most_common', 'job'],
+    ['most_common', 'marital'],
+    ['most_common', 'education'],
+    ['mean', 'age'],
+    ['mean', 'balance'],
+    ['mean', 'duration']
+    ]
+
+# variables
+label_groups_df = {}
+
+
+# Create Measures Per Group/Label ---------------------------------------------
+# seperate groups
+for label in set(label_df['db_cluster']):
+    label_groups_df[label] = label_df[label_df['db_cluster'] == label]
+
+common_features_2 = dict(map(
+    lambda x: apply_measures(x[0], x[1]), label_groups_df.items())
+    )
+
+
+new_table = pd.DataFrame()
+
+for indexes in indexes_list:
+    for key in common_features_2.keys():
+        new_table.loc['_'.join(map(str, indexes)), key] = (
+            common_features_2[key].at[indexes[0], indexes[1]]
+            )
+
+# Bar plots
+fig, axes = plt.subplots(3, 2, figsize=(16, 16))
+axes_flat = axes.flatten()
+
+# colors
+cmap = cm.viridis
+num_colors = len(set(pca_gower_clean_result['db_cluster']))
+colors = [cmap(i / num_colors) for i in range(num_colors)]
+color_map = {id_val: colors[i] for i, id_val in enumerate(
+    sorted(set(pca_gower_clean_result['db_cluster'])))}
+pca_gower_clean_result['color'] = (
+    pca_gower_clean_result['id'].map(color_map)
+    )
+
+for ax, index in zip(axes_flat, indexes_list):
+    print(index)
+    # Plot the scatter with custom colors
+    ax.scatter(
+        pca_gower_clean_result.loc[:, 0],  # x-coordinates
+        pca_gower_clean_result.loc[:, 1],  # y-coordinates
+        c=pca_gower_clean_result['color'],  # Custom colors
+        edgecolor='k',  # Black edge for the points
+        alpha=0.7  # Transparency
+    )
+
+    for key, value in adjusted_centroids.items():
+
+        ax.scatter(
+            value[0],
+            value[1],
+            color=colors[key],
+            s=100,
+            edgecolor='white',
+            marker='o',
+            zorder=5
+        )
+
+        try:
+            label = f'{index[0]}_{index[1]}: {new_table.at["_".join(index), key]:,.2f}  '
+        except Exception:
+            label = f'{index[0]}_{index[1]}: {new_table.at["_".join(index), key]}  '
+
+        ax.text(
+            value[0], value[1],
+            s=f'{label}',
+            fontsize=9,
+            ha='right',
+            va='bottom',
+            color='black',
+            bbox=dict(
+                facecolor='white', edgecolor='black', boxstyle='round,pad=0.3'
+            )
+        )
+
+    ax.set_title(f'{index[0]}_{index[1]}')
+    ax.set_xlabel('Principal Component 1')
+    ax.set_ylabel('Principal Component 2')
+
+# fig.suptitle("Bar Plots of Categorical", fontsize=16, y=1.00)
+
+plt.suptitle("gower+DBSCAN:ReducedFeatures", fontsize=16, y=1.00)
+plt.tight_layout()
+plt.show()
+
+# %% gower+kmeans:ReducedFeatures
+
+# variables
+label_groups_df = {}
+
+# colors
+cmap = cm.viridis
+num_colors = len(set(pca_gower_clean_result['db_cluster']))
+colors = [cmap(i / num_colors) for i in range(num_colors)]
+color_map = {id_val: colors[i] for i, id_val in enumerate(
+    sorted(set(pca_gower_clean_result['db_cluster'])))}
+pca_gower_clean_result['color'] = (
+    pca_gower_clean_result['id'].map(color_map)
+    )
+
+# Create Measures Per Group/Label ---------------------------------------------
+# seperate groups
+for label in set(label_df['id']):
+    label_groups_df[label] = label_df[label_df['id'] == label]
+
+common_features_2 = dict(map(
+    lambda x: apply_measures(x[0], x[1]), label_groups_df.items())
+    )
+
+new_table = pd.DataFrame()
+
+for indexes in indexes_list:
+    for key in common_features_2.keys():
+        new_table.loc['_'.join(map(str, indexes)), key] = (
+            common_features_2[key].at[indexes[0], indexes[1]]
+            )
+
+# Bar plots
+fig, axes = plt.subplots(3, 2, figsize=(16, 16))
+axes_flat = axes.flatten()
+
+# colors
+
+num_colors = len(set(pca_gower_clean_result['id']))
+colors = [cmap(i / num_colors) for i in range(num_colors)]
+color_map = {id_val: colors[i] for i, id_val in enumerate(
+    sorted(set(pca_gower_clean_result['id'])))}
+pca_gower_clean_result['color'] = (
+    pca_gower_clean_result['id'].map(color_map)
+    )
+
+for ax, index in zip(axes_flat, indexes_list):
+    print(index)
+    # Plot the scatter with custom colors
+    ax.scatter(
+        pca_gower_clean_result.loc[:, 0],  # x-coordinates
+        pca_gower_clean_result.loc[:, 1],  # y-coordinates
+        c=pca_gower_clean_result['color'],  # Custom colors
+        edgecolor='k',  # Black edge for the points
+        alpha=0.7  # Transparency
+    )
+
+    for key, value in adjusted_centroids.items():
+
+        ax.scatter(
+            value[0],
+            value[1],
+            color=colors[key],
+            s=100,
+            edgecolor='white',
+            marker='o',
+            zorder=5
+        )
+
+        try:
+            label = f'{index[0]}_{index[1]}: {new_table.at["_".join(index), key]:,.2f}  '
+        except Exception:
+            label = f'{index[0]}_{index[1]}: {new_table.at["_".join(index), key]}  '
+
+        ax.text(
+            value[0], value[1],
+            s=f'{label}',
+            fontsize=9,
+            ha='right',
+            va='bottom',
+            color='black',
+            bbox=dict(
+                facecolor='white', edgecolor='black', boxstyle='round,pad=0.3'
+            )
+        )
+
+    ax.set_title(f'{index[0]}_{index[1]}')
+    ax.set_xlabel('Principal Component 1')
+    ax.set_ylabel('Principal Component 2')
+
+# fig.suptitle("Bar Plots of Categorical", fontsize=16, y=1.00)
+
+plt.suptitle("gower+kmeans:ReducedFeatures", fontsize=16, y=1.00)
+plt.tight_layout()
+plt.show()
+
+# %% kmeans
+
+pca_result_df = pd.DataFrame(pca_result.copy())
+
+# Create Measures Per Group/Label ---------------------------------------------
+
+kmeans = KMeans(n_clusters=3, random_state=seed)  # Change number of clusters as needed
+kmeans.fit(pca_result)
+labels = kmeans.labels_
+label_df = pd.DataFrame(df_subscribers.copy())
+label_df['id'] = labels
+pca_result_df['id'] = labels
+
+# seperate groups
+for label in set(label_df['id']):
+    label_groups_df[label] = label_df[label_df['id'] == label]
+
+common_features_2 = dict(map(
+    lambda x: apply_measures(x[0], x[1]), label_groups_df.items())
+    )
+
+new_table = pd.DataFrame()
+
+for indexes in indexes_list:
+    for key in common_features_2.keys():
+        new_table.loc['_'.join(map(str, indexes)), key] = (
+            common_features_2[key].at[indexes[0], indexes[1]]
+            )
+
+# Create Centriods and Adjust -------------------------------------------------
+centroids = {}
+
+for label in label_df.id:
+    temp = pca_result_df[pca_result_df['id'] == label]
+    centroids[label] = (temp[0].mean(), temp[1].mean())
+
+
+def adjust_centroids(centroids, min_distance):
+    """
+    Adjust centroids if they are too close to each other by adding a margin.
+
+    Parameters:
+    - centroids: A dictionary where keys are labels and values are 2D
+    centroids (x, y).
+    - min_distance: The minimum allowed distance between any two centroids.
+
+    Returns:
+    - Adjusted centroids with the margin added.
+    """
+    labels = list(centroids.keys())
+    adjusted_centroids = centroids.copy()
+
+    for i in range(len(labels)):
+        for j in range(i + 1, len(labels)):
+            label_i = labels[i]
+            label_j = labels[j]
+            centroid_i = np.array(centroids[label_i])
+            centroid_j = np.array(centroids[label_j])
+
+            dist = np.linalg.norm(centroid_i - centroid_j)
+            if dist < min_distance:
+                # Calculate the direction vector and normalize it
+                direction = centroid_j - centroid_i
+                direction /= np.linalg.norm(direction)
+
+                # Add margin to the centroids in opposite directions
+                margin_vector = direction * (min_distance - dist) / 2
+                adjusted_centroids[label_i] = tuple(centroid_i - margin_vector)
+                adjusted_centroids[label_j] = tuple(centroid_j + margin_vector)
+
+    return adjusted_centroids
+
+
+# Example usage
+min_distance = 2  # Minimum distance to maintain
+
+adjusted_centroids = adjust_centroids(centroids, min_distance)
+
+plt.figure(figsize=(8, 6))
+
+plt.scatter(
+    pca_result[:, 0],
+    pca_result[:, 1],
+    c=labels,
+    cmap='viridis',
+    edgecolor='k',
+    alpha=0.7
+    )
+
+plt.title('TruncatedSVD + PCA + K-means Clustering')
+plt.xlabel('Principal Component 1')
+plt.ylabel('Principal Component 2')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+
+# variables
+label_groups_df = {}
+cmap = cm.viridis
+
+# Bar plots
+fig, axes = plt.subplots(3, 2, figsize=(16, 16))
+axes_flat = axes.flatten()
+
+# colors
+
+num_colors = len(set(label_df['id']))
+colors = [cmap(i / num_colors) for i in range(num_colors)]
+color_map = {id_val: colors[i] for i, id_val in enumerate(
+    sorted(set(label_df['id'])))}
+label_df['color'] = (
+    label_df['id'].map(color_map)
+    )
+
+pca_result_df['color'] = label_df['color'].copy()
+
+for ax, index in zip(axes_flat, indexes_list):
+    print(index)
+    # Plot the scatter with custom colors
+    ax.scatter(
+        pca_result_df.loc[:, 0],  # x-coordinates
+        pca_result_df.loc[:, 1],  # y-coordinates
+        c=pca_result_df['color'],  # Custom colors
+        edgecolor='k',  # Black edge for the points
+        alpha=0.7  # Transparency
+    )
+
+    for key, value in adjusted_centroids.items():
+
+        ax.scatter(
+            value[0],
+            value[1],
+            color=colors[key],
+            s=100,
+            edgecolor='white',
+            marker='o',
+            zorder=5
+        )
+
+        try:
+            label = f'{index[0]}_{index[1]}: {new_table.at["_".join(index), key]:,.2f}  '
+        except Exception:
+            label = f'{index[0]}_{index[1]}: {new_table.at["_".join(index), key]}  '
+
+        ax.text(
+            value[0], value[1],
+            s=f'{label}',
+            fontsize=9,
+            ha='right',
+            va='bottom',
+            color='black',
+            bbox=dict(
+                facecolor='white', edgecolor='black', boxstyle='round,pad=0.3'
+            )
+        )
+
+    ax.set_title(f'{index[0]}_{index[1]}')
+    ax.set_xlabel('Principal Component 1')
+    ax.set_ylabel('Principal Component 2')
+
+# fig.suptitle("Bar Plots of Categorical", fontsize=16, y=1.00)
+
+plt.suptitle("kmeans", fontsize=16, y=1.00)
+plt.tight_layout()
+plt.show()
