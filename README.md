@@ -1,4 +1,5 @@
 Apziva Project 2: Bank Term Deposit Subscription Prediction
+
 Overview
 
 This project aims to predict whether clients will subscribe to a bank's term deposit based on various personal and campaign-related attributes. By analyzing the dataset, we identify key factors influencing client decisions and develop a predictive model to enhance marketing strategies.
